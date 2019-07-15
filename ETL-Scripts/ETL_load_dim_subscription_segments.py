@@ -14,7 +14,7 @@ from pyspark.sql import Row
 import pyspark.sql.functions as func
 from pyspark.sql.functions import lit, col,trim,create_map,concat
 from itertools import chain
-
+# test CI/CD
 spark = SparkSession.builder.appName('Spark Sub Health ETL'
         ).config('hive.exec.dynamic.partition', 'true'
         ).config('hive.exec.dynamic.partition.mode','nonstrict'
