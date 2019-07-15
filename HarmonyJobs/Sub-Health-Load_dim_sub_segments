@@ -1,0 +1,135 @@
+ /* ********************************************************************************
+-- Produced By   : Hulu LLC
+-- Author        : Tejal Dasnurkar
+-- Date          : 2018-06-07        : Harmony script to populate dim_sub_segments table in hive 
+-- Tejal Dasnurkar  : 2018-06-20        : Added the logic for skipped load, changed the command to get latest partition value as table partition changed. 
+-- Muskaan Narang   : 2019-07-05        : Changed the source table and default schema and added live segment data
+-- Harmony Link :  Job id:6805          http://harmony.prod.hulu.com/bash/Sub-Health-Load_dim_sub_segments
+*******************************************************************************/
+
+#!/bin/bash
+"=================================="
+"Initializing"
+"=================================="
+
+bi_prod_schema=bi_prod
+default_schema=datascience
+svod_status=N
+live_status=N
+
+last_svod_partition=$(hive -e 'show partitions bi_prod.dim_subscription_segments_snapshot;' 2>&1 | grep -i 'SVOD' | tail -1 )
+echo $last_svod_partition
+
+if [ $? -ne 0 ]
+then
+  echo "=================================="
+  echo "Hive Get last partition failed !"
+  echo "=================================="
+  exit 1
+fi
+
+last_live_partition=$(hive -e 'show partitions bi_prod.dim_subscription_segments_snapshot;' 2>&1 | grep -i 'LIVE' | tail -1 )
+echo $last_live_partition
+
+if [ $? -ne 0 ]
+then
+  echo "==================================="
+  echo "Hive Get last partition failed !"
+  echo "==================================="
+  exit 1
+fi
+
+extract_svod_date=${last_svod_partition:14:10}
+extract_live_date=${last_live_partition:14:10}
+echo $extract_svod_date
+echo $extract_live_date
+
+if [ $? -ne 0 ]
+then
+  echo "======================================================"
+  echo "Hive Extract date from destination partition failed !"
+  echo "======================================================"
+  exit 1
+fi
+echo "Max SVOD snapshot date from destination is - $extract_svod_date"
+echo "Max LIVE snapshot date from destination is - $extract_live_date"
+
+#"============================================================================================================================================================================================"
+#In case of skipped load when source table has more than one snapshot date load pending, below sql gets the minimum date available in the source table after the last dest. load.
+#"============================================================================================================================================================================================"
+
+source_last_SVOD_partition=$({{{ presto_145 }}} --output-format TSV --execute "select min(snapshot_date) from datascience.svod_segmentation_master where snapshot_date> coalesce('$extract_svod_date','1800-01-01') ;")
+
+source_last_LIVE_partition=$({{{ presto_145 }}} --output-format TSV --execute "select min(snapshot_date) from datascience.live_segmentation_master where snapshot_date> coalesce('$extract_live_date','1800-01-01') ;")
+
+if [ $? -ne 0 ]
+then
+  echo "==============================================="
+  echo "Hive Get source partition failed!"
+  echo "================================================"
+  exit 1
+fi
+
+echo "Snapshot date from SVOD source is - $source_last_SVOD_partition"
+echo "Snapshot date from LIVE source is - $source_last_LIVE_partition"
+
+
+
+if [[ -z $source_last_LIVE_partition ]] && [[ -z $source_last_SVOD_partition ]]
+then
+  echo "No new data available , skip this load."
+exit 0;
+
+fi
+
+
+if [ $source_last_SVOD_partition > $extract_svod_date ] 
+then
+    svod_status=Y
+  echo "New data available in the source table for SVOD..Let's load it "
+
+fi
+
+if  [ $source_last_LIVE_partition > $extract_live_date ]
+then
+  live_status=Y
+  echo "New data available in the source table for LIVE..Let's load it "
+fi
+
+  #"==============================================="
+  # Placeholder for running the DQ job, if DQ job succeeds for recent source table partition, go to next step and load the data in 
+   #dest. table , else fail the harmony job.
+  #"================================================"
+
+if [ -z $source_last_LIVE_partition ]
+then
+  source_last_LIVE_partition=1899-01-01
+fi
+
+if [ -z $source_last_SVOD_partition ]
+then
+  source_last_SVOD_partition=1899-01-01
+fi
+
+
+HADOOP_USER_NAME=hdfs {{{ firework_home }}}/bin/spark-submit  \
+--env las \
+--spark-version 2.1.1 \
+--num-executors 4 \
+--driver-memory 5g \
+--executor-memory 4g \
+--master yarn \
+--deploy-mode cluster \
+--conf spark.hadoop.fs.defaultFS=hdfs://warehousestore/ \
+--queue etl \
+hdfs://beaconstore/user/reporting/ETL_pyspark/ETL_load_dim_subscription_segments.py ${default_schema} ${bi_prod_schema} ${source_last_LIVE_partition} ${source_last_SVOD_partition} ${test_schema} ${svod_status} ${live_status}
+
+if [ $? -ne 0 ]
+then
+  echo "==============================================="
+  echo "Spark job failed!"
+  echo "================================================"
+  exit 1
+fi
+
+exit 0;
